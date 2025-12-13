@@ -8,21 +8,32 @@ set -euo pipefail
 REMI_BASE="/opt/remi"
 EXT_LIST="$HOME/.config/php/extensions"
 
-# Detect OS from /etc/os-release
+# Detect OS
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        case "$ID" in
-            fedora) echo "fedora" ;;
-            ubuntu|debian) echo "ubuntu" ;;
-            *) echo "unknown" ;;
-        esac
-    else
-        echo "unknown"
-    fi
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                case "$ID" in
+                    fedora) echo "fedora" ;;
+                    ubuntu|debian) echo "ubuntu" ;;
+                    *) echo "unknown" ;;
+                esac
+            else
+                echo "unknown"
+            fi
+            ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 DISTRO=$(detect_os)
+
+# Set Homebrew prefix for macOS (Apple Silicon vs Intel)
+if [[ "$DISTRO" == "macos" ]]; then
+    HOMEBREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
+fi
 
 # Convert version string to Remi package name format (8.2 -> 82)
 version_to_remi() {
@@ -59,6 +70,25 @@ get_installed_versions() {
                 fi
             done
             ;;
+        macos)
+            for php_dir in "$HOMEBREW_PREFIX"/opt/php@*/bin/php; do
+                if [[ -x "$php_dir" ]]; then
+                    local dir_name
+                    dir_name=$(dirname "$(dirname "$php_dir")")
+                    dir_name=$(basename "$dir_name")
+                    local ver="${dir_name#php@}"
+                    versions+=("$ver")
+                fi
+            done
+            # Also check unversioned php (latest)
+            if [[ -x "$HOMEBREW_PREFIX/opt/php/bin/php" ]]; then
+                local latest_ver
+                latest_ver=$("$HOMEBREW_PREFIX/opt/php/bin/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
+                if [[ -n "$latest_ver" ]] && ! printf '%s\n' "${versions[@]}" | grep -qx "$latest_ver"; then
+                    versions+=("$latest_ver")
+                fi
+            fi
+            ;;
     esac
     printf '%s\n' "${versions[@]}" 2>/dev/null | sort -t. -k1,1n -k2,2n
 }
@@ -86,6 +116,20 @@ install_extension() {
                 echo "Installed $extension for PHP $version"
             else
                 echo "Failed: $extension for PHP $version (package may not exist)"
+            fi
+            ;;
+        macos)
+            # Use PECL for macOS extension installation
+            local pecl_bin="$HOMEBREW_PREFIX/opt/php@${version}/bin/pecl"
+            [[ ! -x "$pecl_bin" ]] && pecl_bin="$HOMEBREW_PREFIX/opt/php/bin/pecl"
+            if [[ -x "$pecl_bin" ]]; then
+                if "$pecl_bin" install "$extension" &>/dev/null; then
+                    echo "Installed $extension for PHP $version (via PECL)"
+                else
+                    echo "Failed: $extension for PHP $version (PECL install failed or already installed)"
+                fi
+            else
+                echo "Failed: $extension for PHP $version (PECL not found)"
             fi
             ;;
     esac

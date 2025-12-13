@@ -6,6 +6,7 @@ Wrapper scripts for managing multiple PHP and Node.js versions automatically bas
 
 - Fedora (using Remi repository)
 - Ubuntu/Debian (using Ondřej Surý PPA)
+- macOS (using Homebrew)
 
 ## Scripts
 
@@ -32,6 +33,16 @@ sudo dnf install -y git curl
 
 ```bash
 sudo apt-get install -y git curl
+```
+
+**macOS:**
+
+```bash
+# Install Homebrew if not already installed
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install git (curl is included with macOS)
+brew install git
 ```
 
 Other dependencies (`jq`, PHP repositories, `fnm`) are installed automatically by the scripts when needed.
@@ -86,6 +97,8 @@ php-ext --sync
 ```
 
 Extensions are saved to `~/.config/php/extensions` for automatic installation with new PHP versions.
+
+**Note for macOS:** Extensions are installed via PECL instead of package manager. Most common extensions (curl, mbstring, etc.) are already bundled with Homebrew PHP.
 
 ### Node.js Version Management
 

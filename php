@@ -9,21 +9,32 @@ REMI_BASE="/opt/remi"
 USER_PHP_CONF="$HOME/.config/php/conf.d"
 EXT_LIST="$HOME/.config/php/extensions"
 
-# Detect OS from /etc/os-release
+# Detect OS
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        case "$ID" in
-            fedora) echo "fedora" ;;
-            ubuntu|debian) echo "ubuntu" ;;
-            *) echo "unknown" ;;
-        esac
-    else
-        echo "unknown"
-    fi
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                case "$ID" in
+                    fedora) echo "fedora" ;;
+                    ubuntu|debian) echo "ubuntu" ;;
+                    *) echo "unknown" ;;
+                esac
+            else
+                echo "unknown"
+            fi
+            ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 DISTRO=$(detect_os)
+
+# Set Homebrew prefix for macOS (Apple Silicon vs Intel)
+if [[ "$DISTRO" == "macos" ]]; then
+    HOMEBREW_PREFIX=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
+fi
 
 # Ensure jq is available (needed for composer.json parsing)
 ensure_jq() {
@@ -31,6 +42,7 @@ ensure_jq() {
         case "$DISTRO" in
             fedora) sudo dnf install -y jq &>/dev/null ;;
             ubuntu) sudo apt-get install -y jq &>/dev/null ;;
+            macos) brew install jq &>/dev/null ;;
         esac
     fi
 }
@@ -51,6 +63,9 @@ ensure_php_repo() {
                 sudo add-apt-repository -y ppa:ondrej/php &>/dev/null
                 sudo apt-get update &>/dev/null
             fi
+            ;;
+        macos)
+            # Homebrew handles PHP availability, no repo setup needed
             ;;
     esac
 }
@@ -97,6 +112,26 @@ get_installed_versions() {
                 fi
             done
             ;;
+        macos)
+            for php_dir in "$HOMEBREW_PREFIX"/opt/php@*/bin/php; do
+                if [[ -x "$php_dir" ]]; then
+                    local dir_name
+                    dir_name=$(dirname "$(dirname "$php_dir")")
+                    dir_name=$(basename "$dir_name")
+                    # Extract version from php@X.Y
+                    local ver="${dir_name#php@}"
+                    versions+=("$ver")
+                fi
+            done
+            # Also check unversioned php (latest)
+            if [[ -x "$HOMEBREW_PREFIX/opt/php/bin/php" ]]; then
+                local latest_ver
+                latest_ver=$("$HOMEBREW_PREFIX/opt/php/bin/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
+                if [[ -n "$latest_ver" ]] && ! printf '%s\n' "${versions[@]}" | grep -qx "$latest_ver"; then
+                    versions+=("$latest_ver")
+                fi
+            fi
+            ;;
     esac
     # Sort by version and output
     printf '%s\n' "${versions[@]}" 2>/dev/null | sort -t. -k1,1n -k2,2n
@@ -130,6 +165,16 @@ get_latest_available() {
             done
             echo "8.4"  # Default if nothing found
             ;;
+        macos)
+            # Check for available PHP versions, prefer newest
+            for ver in 8.4 8.3 8.2 8.1 8.0; do
+                if brew info "php@${ver}" &>/dev/null 2>&1; then
+                    echo "$ver"
+                    return
+                fi
+            done
+            echo "8.4"  # Default if nothing found
+            ;;
     esac
 }
 
@@ -145,6 +190,9 @@ install_php_version() {
             ;;
         ubuntu)
             sudo apt-get install -y "php${version}" &>/dev/null
+            ;;
+        macos)
+            brew install "php@${version}" &>/dev/null
             ;;
     esac
     install_saved_extensions "$version"
@@ -163,6 +211,14 @@ install_saved_extensions() {
                     ;;
                 ubuntu)
                     sudo apt-get install -y "php${version}-${ext}" &>/dev/null || true
+                    ;;
+                macos)
+                    # Use PECL for macOS extension installation
+                    local pecl_bin="$HOMEBREW_PREFIX/opt/php@${version}/bin/pecl"
+                    [[ ! -x "$pecl_bin" ]] && pecl_bin="$HOMEBREW_PREFIX/opt/php/bin/pecl"
+                    if [[ -x "$pecl_bin" ]]; then
+                        "$pecl_bin" install "$ext" &>/dev/null || true
+                    fi
                     ;;
             esac
         done < "$EXT_LIST"
@@ -271,6 +327,11 @@ is_version_installed() {
         ubuntu)
             [[ -x "/usr/bin/php${version}" ]]
             ;;
+        macos)
+            [[ -x "$HOMEBREW_PREFIX/opt/php@${version}/bin/php" ]] || \
+            { [[ -x "$HOMEBREW_PREFIX/opt/php/bin/php" ]] && \
+              [[ "$("$HOMEBREW_PREFIX/opt/php/bin/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)" == "$version" ]]; }
+            ;;
     esac
 }
 
@@ -287,6 +348,9 @@ setup_ini_scan_dir() {
             ;;
         ubuntu)
             system_conf="/etc/php/${version}/cli/conf.d"
+            ;;
+        macos)
+            system_conf="$HOMEBREW_PREFIX/etc/php/${version}/conf.d"
             ;;
     esac
 
@@ -308,6 +372,14 @@ get_php_binary() {
             ;;
         ubuntu)
             echo "/usr/bin/php${version}"
+            ;;
+        macos)
+            # Try versioned formula first, then unversioned
+            if [[ -x "$HOMEBREW_PREFIX/opt/php@${version}/bin/php" ]]; then
+                echo "$HOMEBREW_PREFIX/opt/php@${version}/bin/php"
+            else
+                echo "$HOMEBREW_PREFIX/opt/php/bin/php"
+            fi
             ;;
     esac
 }

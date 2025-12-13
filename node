@@ -9,18 +9,24 @@ set -euo pipefail
 FNM_DIR="$HOME/.local/share/fnm"
 FNM_BIN="$FNM_DIR/fnm"
 
-# Detect OS from /etc/os-release
+# Detect OS
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        case "$ID" in
-            fedora) echo "fedora" ;;
-            ubuntu|debian) echo "ubuntu" ;;
-            *) echo "unknown" ;;
-        esac
-    else
-        echo "unknown"
-    fi
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                case "$ID" in
+                    fedora) echo "fedora" ;;
+                    ubuntu|debian) echo "ubuntu" ;;
+                    *) echo "unknown" ;;
+                esac
+            else
+                echo "unknown"
+            fi
+            ;;
+        *) echo "unknown" ;;
+    esac
 }
 
 DISTRO=$(detect_os)
@@ -31,6 +37,7 @@ ensure_jq() {
         case "$DISTRO" in
             fedora) sudo dnf install -y jq &>/dev/null ;;
             ubuntu) sudo apt-get install -y jq &>/dev/null ;;
+            macos) brew install jq &>/dev/null ;;
         esac
     fi
 }
