@@ -1,0 +1,48 @@
+#!/bin/bash
+# Composer wrapper - uses the php wrapper for version management
+# Selects Composer LTS (2.2.x) for PHP < 7.2, latest otherwise
+
+set -euo pipefail
+
+COMPOSER_DIR="$HOME/.local/share/composer"
+COMPOSER_LTS="$COMPOSER_DIR/composer-lts.phar"
+COMPOSER_LATEST="$COMPOSER_DIR/composer-latest.phar"
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+
+# Download composer phar
+download_composer() {
+    local target="$1"
+    local version="$2"
+
+    mkdir -p "$COMPOSER_DIR"
+
+    if [[ "$version" == "lts" ]]; then
+        curl -sL "https://getcomposer.org/download/latest-2.2.x/composer.phar" -o "$target"
+    else
+        curl -sL "https://getcomposer.org/download/latest-stable/composer.phar" -o "$target"
+    fi
+    chmod +x "$target"
+}
+
+# Main
+main() {
+    # Get PHP version from our php wrapper
+    local php_version
+    php_version=$("$SCRIPT_DIR/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
+
+    local composer_phar
+
+    # Composer 2.3+ requires PHP 7.2.5+
+    # Use LTS (2.2.x) for older PHP versions
+    if [[ "${php_version%%.*}" -lt 7 ]] || [[ "$php_version" < "7.2" ]]; then
+        [[ ! -f "$COMPOSER_LTS" ]] && download_composer "$COMPOSER_LTS" "lts"
+        composer_phar="$COMPOSER_LTS"
+    else
+        [[ ! -f "$COMPOSER_LATEST" ]] && download_composer "$COMPOSER_LATEST" "latest"
+        composer_phar="$COMPOSER_LATEST"
+    fi
+
+    exec "$SCRIPT_DIR/php" "$composer_phar" "$@"
+}
+
+main "$@"

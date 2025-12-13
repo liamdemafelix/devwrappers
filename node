@@ -1,0 +1,201 @@
+#!/bin/bash
+# Node Version Manager Wrapper
+# Automatically selects Node version based on .nvmrc or package.json (volta)
+# Uses fnm as the backend
+# Supports Fedora and Ubuntu/Debian
+
+set -euo pipefail
+
+FNM_DIR="$HOME/.local/share/fnm"
+FNM_BIN="$FNM_DIR/fnm"
+
+# Detect OS from /etc/os-release
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            fedora) echo "fedora" ;;
+            ubuntu|debian) echo "ubuntu" ;;
+            *) echo "unknown" ;;
+        esac
+    else
+        echo "unknown"
+    fi
+}
+
+DISTRO=$(detect_os)
+
+# Ensure jq is available
+ensure_jq() {
+    if ! command -v jq &>/dev/null; then
+        case "$DISTRO" in
+            fedora) sudo dnf install -y jq &>/dev/null ;;
+            ubuntu) sudo apt-get install -y jq &>/dev/null ;;
+        esac
+    fi
+}
+
+# Ensure fnm is installed
+ensure_fnm() {
+    if [[ ! -x "$FNM_BIN" ]]; then
+        curl -fsSL https://fnm.vercel.app/install | bash -s -- --install-dir "$FNM_DIR" --skip-shell &>/dev/null
+    fi
+    export PATH="$FNM_DIR:$PATH"
+}
+
+# Read version from .nvmrc
+read_nvmrc() {
+    if [[ -f ".nvmrc" ]]; then
+        local version
+        version=$(head -1 .nvmrc | tr -d '[:space:]')
+        if [[ -n "$version" ]]; then
+            echo "$version"
+        fi
+    fi
+}
+
+# Read version from package.json (volta.node)
+read_package_json() {
+    if [[ -f "package.json" ]]; then
+        ensure_jq
+        local volta_node
+        volta_node=$(jq -r '.volta.node // empty' package.json 2>/dev/null)
+        if [[ -n "$volta_node" ]]; then
+            echo "$volta_node"
+        fi
+    fi
+}
+
+# Get required Node version from project files
+get_required_version() {
+    local version=""
+
+    # Priority 1: .nvmrc
+    version=$(read_nvmrc)
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return
+    fi
+
+    # Priority 2: package.json volta.node
+    version=$(read_package_json)
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return
+    fi
+}
+
+# Normalize version string for fnm
+# Handles: lts/*, lts/iron, lts, node, 20, 20.10, 20.10.0
+normalize_version() {
+    local version="$1"
+
+    # Handle lts/* or lts
+    if [[ "$version" == "lts/*" || "$version" == "lts" ]]; then
+        echo "--lts"
+        return
+    fi
+
+    # Handle lts/<codename>
+    if [[ "$version" =~ ^lts/(.+)$ ]]; then
+        echo "--lts=${BASH_REMATCH[1]}"
+        return
+    fi
+
+    # Handle "node" (latest)
+    if [[ "$version" == "node" ]]; then
+        echo "--latest"
+        return
+    fi
+
+    # Regular version number
+    echo "$version"
+}
+
+# Check if a version is installed
+is_version_installed() {
+    local version="$1"
+    "$FNM_BIN" list 2>/dev/null | grep -qE "v?${version}" 2>/dev/null
+}
+
+# Install a Node version
+install_version() {
+    local version="$1"
+    "$FNM_BIN" install "$version" &>/dev/null
+}
+
+# Get the installed version that matches the request
+get_installed_version() {
+    local requested="$1"
+
+    # For lts, get the lts version
+    if [[ "$requested" == "--lts" ]]; then
+        "$FNM_BIN" list 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | tail -1 | tr -d 'v'
+        return
+    fi
+
+    # For specific version, find matching
+    if [[ "$requested" =~ ^[0-9]+$ ]]; then
+        # Major only - find latest matching
+        "$FNM_BIN" list 2>/dev/null | grep -oE "v${requested}\.[0-9]+\.[0-9]+" | tail -1 | tr -d 'v'
+    elif [[ "$requested" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        # Major.minor - find latest matching
+        "$FNM_BIN" list 2>/dev/null | grep -oE "v${requested}\.[0-9]+" | tail -1 | tr -d 'v'
+    else
+        # Exact version
+        echo "$requested" | tr -d 'v'
+    fi
+}
+
+# Main function
+main() {
+    ensure_fnm
+
+    local required_version
+    local normalized_version
+    local install_arg
+
+    # Get required version from project files
+    required_version=$(get_required_version)
+
+    # Default to LTS if nothing specified
+    if [[ -z "$required_version" ]]; then
+        required_version="lts/*"
+    fi
+
+    # Normalize for fnm
+    normalized_version=$(normalize_version "$required_version")
+
+    # Determine install argument
+    if [[ "$normalized_version" == "--lts" ]]; then
+        install_arg="--lts"
+    elif [[ "$normalized_version" == "--latest" ]]; then
+        install_arg="--latest"
+    elif [[ "$normalized_version" =~ ^--lts= ]]; then
+        install_arg="$normalized_version"
+    else
+        install_arg="$normalized_version"
+    fi
+
+    # Install if needed (fnm handles this gracefully)
+    "$FNM_BIN" install "$install_arg" &>/dev/null || true
+
+    # Execute node with the correct version
+    export FNM_DIR
+    export FNM_MULTISHELL_PATH="$FNM_DIR/multishells/$$"
+    export FNM_VERSION_FILE_STRATEGY="local"
+    export FNM_LOGLEVEL="quiet"
+
+    # Use fnm exec to run node with the right version
+    if [[ "$normalized_version" == "--lts" ]]; then
+        exec "$FNM_BIN" exec --using=lts-latest -- node "$@"
+    elif [[ "$normalized_version" == "--latest" ]]; then
+        exec "$FNM_BIN" exec --using=latest -- node "$@"
+    elif [[ "$normalized_version" =~ ^--lts=(.+)$ ]]; then
+        exec "$FNM_BIN" exec --using="lts-${BASH_REMATCH[1]}" -- node "$@"
+    else
+        exec "$FNM_BIN" exec --using="$normalized_version" -- node "$@"
+    fi
+}
+
+main "$@"

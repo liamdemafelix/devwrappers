@@ -1,0 +1,170 @@
+#!/bin/bash
+# PHP Extension Installer
+# Installs PHP extensions for all installed PHP versions
+# Supports Fedora (Remi) and Ubuntu/Debian (Ondřej PPA)
+
+set -euo pipefail
+
+REMI_BASE="/opt/remi"
+EXT_LIST="$HOME/.config/php/extensions"
+
+# Detect OS from /etc/os-release
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            fedora) echo "fedora" ;;
+            ubuntu|debian) echo "ubuntu" ;;
+            *) echo "unknown" ;;
+        esac
+    else
+        echo "unknown"
+    fi
+}
+
+DISTRO=$(detect_os)
+
+# Convert version string to Remi package name format (8.2 -> 82)
+version_to_remi() {
+    local version="$1"
+    echo "$version" | tr -d '.'
+}
+
+# Convert Remi format to version string (82 -> 8.2)
+remi_to_version() {
+    local remi="$1"
+    echo "${remi:0:1}.${remi:1:1}"
+}
+
+# Get list of installed PHP versions (returns X.Y format: 7.4, 8.0, 8.1, etc.)
+get_installed_versions() {
+    local versions=()
+    case "$DISTRO" in
+        fedora)
+            for php_dir in "$REMI_BASE"/php*/root/usr/bin/php; do
+                if [[ -x "$php_dir" ]]; then
+                    local dir_name
+                    dir_name=$(dirname "$(dirname "$(dirname "$(dirname "$php_dir")")")")
+                    dir_name=$(basename "$dir_name")
+                    local ver="${dir_name#php}"
+                    versions+=("$(remi_to_version "$ver")")
+                fi
+            done
+            ;;
+        ubuntu)
+            for php_bin in /usr/bin/php[0-9].[0-9]; do
+                if [[ -x "$php_bin" ]]; then
+                    local ver="${php_bin#/usr/bin/php}"
+                    versions+=("$ver")
+                fi
+            done
+            ;;
+    esac
+    printf '%s\n' "${versions[@]}" 2>/dev/null | sort -t. -k1,1n -k2,2n
+}
+
+# Install extension for a specific PHP version (takes X.Y format)
+install_extension() {
+    local version="$1"
+    local extension="$2"
+    local package
+
+    case "$DISTRO" in
+        fedora)
+            local remi_ver
+            remi_ver=$(version_to_remi "$version")
+            package="php${remi_ver}-php-${extension}"
+            if sudo dnf install -y "$package" &>/dev/null; then
+                echo "Installed $extension for PHP $version"
+            else
+                echo "Failed: $extension for PHP $version (package may not exist)"
+            fi
+            ;;
+        ubuntu)
+            package="php${version}-${extension}"
+            if sudo apt-get install -y "$package" &>/dev/null; then
+                echo "Installed $extension for PHP $version"
+            else
+                echo "Failed: $extension for PHP $version (package may not exist)"
+            fi
+            ;;
+    esac
+}
+
+# Save extension to list
+save_extension() {
+    local extension="$1"
+    mkdir -p "$(dirname "$EXT_LIST")"
+    if [[ ! -f "$EXT_LIST" ]] || ! grep -qx "$extension" "$EXT_LIST"; then
+        echo "$extension" >> "$EXT_LIST"
+    fi
+}
+
+# Get saved extensions
+get_saved_extensions() {
+    if [[ -f "$EXT_LIST" ]]; then
+        cat "$EXT_LIST"
+    fi
+}
+
+# Show usage
+usage() {
+    echo "Usage: php-ext <extension> [extension...]"
+    echo "       php-ext --sync"
+    echo ""
+    echo "Installs PHP extensions for all installed PHP versions."
+    echo "Extensions are saved to $EXT_LIST"
+    echo ""
+    echo "Options:"
+    echo "  --sync    Install all saved extensions for all PHP versions"
+    echo ""
+    echo "Example: php-ext phar mbstring curl"
+    exit 1
+}
+
+# Install extensions for all versions
+install_extensions() {
+    local versions="$1"
+    shift
+    local extensions=("$@")
+
+    for extension in "${extensions[@]}"; do
+        echo "Installing php-$extension for all PHP versions..."
+        while IFS= read -r remi_ver; do
+            install_extension "$remi_ver" "$extension"
+        done <<< "$versions"
+    done
+}
+
+# Main function
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage
+    fi
+
+    local versions
+    versions=$(get_installed_versions)
+
+    if [[ -z "$versions" ]]; then
+        echo "No PHP versions installed"
+        exit 1
+    fi
+
+    if [[ "$1" == "--sync" ]]; then
+        local saved
+        saved=$(get_saved_extensions)
+        if [[ -z "$saved" ]]; then
+            echo "No saved extensions in $EXT_LIST"
+            exit 0
+        fi
+        mapfile -t extensions <<< "$saved"
+        install_extensions "$versions" "${extensions[@]}"
+    else
+        for extension in "$@"; do
+            save_extension "$extension"
+        done
+        install_extensions "$versions" "$@"
+    fi
+}
+
+main "$@"
