@@ -20,10 +20,38 @@ Wrapper scripts for managing multiple PHP and Node.js versions automatically bas
 
 ## Installation
 
-Add the scripts directory to your PATH:
+### Prerequisites
+
+**Fedora:**
 
 ```bash
-export PATH="$HOME/Scripts:$PATH"
+sudo dnf install -y git curl
+```
+
+**Ubuntu/Debian:**
+
+```bash
+sudo apt-get install -y git curl
+```
+
+Other dependencies (`jq`, PHP repositories, `fnm`) are installed automatically by the scripts when needed.
+
+### Clone and Setup
+
+```bash
+git clone https://github.com/YOUR_USERNAME/scripts.git ~/.local/share/dev-scripts
+```
+
+Add to your shell configuration (`~/.bashrc` or `~/.zshrc`):
+
+```bash
+export PATH="$HOME/.local/share/dev-scripts:$PATH"
+```
+
+Reload your shell:
+
+```bash
+source ~/.bashrc  # or source ~/.zshrc
 ```
 
 ## Usage
