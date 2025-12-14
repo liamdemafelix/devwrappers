@@ -50,7 +50,7 @@ Other dependencies (`jq`, PHP repositories, `fnm`) are installed automatically b
 ### Clone and Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/scripts.git ~/.local/share/dev-scripts
+git clone https://github.com/liamdemafelix/devwrappers.git ~/.local/share/dev-scripts
 ```
 
 Add to your shell configuration (`~/.bashrc` or `~/.zshrc`):
