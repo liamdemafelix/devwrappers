@@ -29,6 +29,14 @@ ensure_php_repo() {
 
 get_php_version() {
     local path="$1"
+    local dir="$path"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/.php-version" ]] || [[ -f "$dir/composer.json" ]]; then
+            (cd "$dir" && "$SCRIPT_DIR/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
+            return
+        fi
+        dir="$(dirname "$dir")"
+    done
     (cd "$path" && "$SCRIPT_DIR/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
 }
 
