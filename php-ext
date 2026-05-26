@@ -114,6 +114,10 @@ install_extension() {
             package="php${version}-${extension}"
             if sudo apt-get install -y "$package" &>/dev/null; then
                 echo "Installed $extension for PHP $version"
+                if systemctl is-active --quiet "php${version}-fpm" 2>/dev/null; then
+                    sudo systemctl reload "php${version}-fpm"
+                    echo "Reloaded php${version}-fpm"
+                fi
             else
                 echo "Failed: $extension for PHP $version (package may not exist)"
             fi
