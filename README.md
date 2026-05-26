@@ -18,6 +18,7 @@ Wrapper scripts for managing multiple PHP and Node.js versions automatically bas
 | `npm` | NPM wrapper using the node script for version management |
 | `npx` | NPX wrapper using the node script for version management |
 | `composer` | Composer wrapper with automatic PHP version selection |
+| `caddy-setup` | Provisions Caddy vhosts with PHP-FPM pools or static/SPA serving |
 
 ## Installation
 
@@ -143,6 +144,30 @@ Place custom `.ini` files in `~/.config/php/conf.d/` to apply settings across al
 | PHP custom config | `~/.config/php/conf.d/` |
 | Composer phars | `~/.local/share/composer/` |
 | fnm installation | `~/.local/share/fnm/` |
+
+### Caddy Vhost Setup
+
+Provision a Caddy vhost with a single command:
+
+```bash
+# PHP project — auto-detects version, installs FPM if needed, creates pool + vhost
+sudo caddy-setup php myapp.example.com /home/liam/projects/myapp
+
+# Static/SPA (Vue, React, etc.) — serves dist with HTML5 history fallback
+sudo caddy-setup static app.example.com /home/liam/projects/frontend/dist
+```
+
+The PHP template:
+- Detects the required version from `.php-version` or `composer.json`
+- Installs `php{version}-fpm` if not present (via Ondřej PPA)
+- Creates a per-domain FPM pool under `/etc/php/{version}/fpm/pool.d/`
+- Reuses an already-running FPM service — just adds a new pool and reloads
+- Applies sane defaults: 512 MB `memory_limit`, 96 MB `upload_max_filesize`, 100 MB `post_max_size`
+- Writes a vhost to `/etc/caddy/conf.d/{domain}.caddy` and reloads Caddy
+
+Both templates are idempotent — running them again on an existing domain prints a notice and skips.
+
+**Note:** Requires `sudo`. Caddy must already be installed and managed by systemd.
 
 ## License
 

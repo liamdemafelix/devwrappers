@@ -1,0 +1,373 @@
+#!/bin/bash
+# Caddy vhost provisioner
+# Usage: caddy-setup <template> <domain> <path>
+# Templates: php, static
+
+set -euo pipefail
+
+FPM_LISTEN_OWNER="caddy"
+FPM_LISTEN_GROUP="caddy"
+CADDY_CONF_DIR="/etc/caddy/conf.d"
+CADDY_FILE="/etc/caddy/Caddyfile"
+
+# ---------------------------------------------------------------------------
+# OS detection
+# ---------------------------------------------------------------------------
+
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                case "$ID" in
+                    fedora) echo "fedora" ;;
+                    ubuntu|debian) echo "ubuntu" ;;
+                    *) echo "unknown" ;;
+                esac
+            else
+                echo "unknown"
+            fi
+            ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+DISTRO=$(detect_os)
+
+# ---------------------------------------------------------------------------
+# PHP repo / jq helpers (mirrors php script)
+# ---------------------------------------------------------------------------
+
+ensure_jq() {
+    if ! command -v jq &>/dev/null; then
+        case "$DISTRO" in
+            ubuntu) sudo apt-get install -y jq &>/dev/null ;;
+            fedora) sudo dnf install -y jq &>/dev/null ;;
+        esac
+    fi
+}
+
+ensure_php_repo() {
+    case "$DISTRO" in
+        ubuntu)
+            if ! grep -q "ondrej/php" /etc/apt/sources.list.d/*.list 2>/dev/null; then
+                sudo apt-get install -y software-properties-common &>/dev/null
+                sudo add-apt-repository -y ppa:ondrej/php &>/dev/null
+                sudo apt-get update &>/dev/null
+            fi
+            ;;
+        fedora)
+            if ! ls /etc/yum.repos.d/remi* &>/dev/null; then
+                local fedora_version
+                fedora_version=$(rpm -E %fedora)
+                sudo dnf install -y "https://rpms.remirepo.net/fedora/remi-release-${fedora_version}.rpm" &>/dev/null
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# PHP version detection (mirrors php script logic)
+# ---------------------------------------------------------------------------
+
+parse_version_constraint() {
+    local constraint="$1"
+    constraint="${constraint// /}"
+    constraint="${constraint%%,*}"
+    constraint="${constraint%%|*}"
+
+    if [[ "$constraint" =~ ^\^([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$constraint" =~ ^\>=([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$constraint" =~ ^\>([0-9]+)\.([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1))"
+    elif [[ "$constraint" =~ ^~([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$constraint" =~ ^([0-9]+\.[0-9]+)\.\* ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$constraint" =~ ^([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    elif [[ "$constraint" =~ ^([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}.0"
+    fi
+}
+
+read_php_version_file() {
+    local path="$1"
+    if [[ -f "$path/.php-version" ]]; then
+        local version
+        version=$(head -1 "$path/.php-version" | tr -d '[:space:]')
+        if [[ "$version" =~ ^([0-9]+)$ ]]; then
+            echo "${version}.0"
+        elif [[ "$version" =~ ^([0-9]+\.[0-9]+) ]]; then
+            echo "${BASH_REMATCH[1]}"
+        fi
+    fi
+}
+
+read_composer_json() {
+    local path="$1"
+    if [[ -f "$path/composer.json" ]]; then
+        ensure_jq
+        local php_require
+        php_require=$(jq -r '.require.php // empty' "$path/composer.json" 2>/dev/null)
+        if [[ -n "$php_require" ]]; then
+            parse_version_constraint "$php_require"
+        fi
+    fi
+}
+
+get_latest_installed_php() {
+    case "$DISTRO" in
+        ubuntu)
+            local latest=""
+            for php_bin in /usr/bin/php[0-9].[0-9]; do
+                [[ -x "$php_bin" ]] && latest="${php_bin#/usr/bin/php}"
+            done
+            echo "$latest"
+            ;;
+        fedora)
+            local latest=""
+            for php_dir in /opt/remi/php*/root/usr/bin/php; do
+                [[ -x "$php_dir" ]] && latest=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$php_dir")")")")")
+                latest="${latest#php}"
+                [[ ${#latest} -eq 2 ]] && latest="${latest:0:1}.${latest:1:1}"
+            done
+            echo "$latest"
+            ;;
+    esac
+}
+
+get_php_version() {
+    local path="$1"
+    local version
+
+    version=$(read_php_version_file "$path")
+    [[ -n "$version" ]] && echo "$version" && return
+
+    version=$(read_composer_json "$path")
+    [[ -n "$version" ]] && echo "$version" && return
+
+    version=$(get_latest_installed_php)
+    [[ -n "$version" ]] && echo "$version" && return
+
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# PHP-FPM helpers
+# ---------------------------------------------------------------------------
+
+is_fpm_installed() {
+    local version="$1"
+    dpkg -s "php${version}-fpm" 2>/dev/null | grep -q "Status: install ok installed"
+}
+
+install_fpm() {
+    local version="$1"
+    echo "Installing php${version}-fpm..."
+    ensure_php_repo
+    sudo apt-get install -y "php${version}-fpm"
+}
+
+ensure_fpm_running() {
+    local version="$1"
+    if ! is_fpm_installed "$version"; then
+        install_fpm "$version"
+    fi
+    if ! systemctl is-active --quiet "php${version}-fpm"; then
+        echo "Starting php${version}-fpm..."
+        sudo systemctl enable --now "php${version}-fpm"
+    fi
+}
+
+setup_fpm_pool() {
+    local version="$1"
+    local pool_name="$2"
+    local project_path="$3"
+    local pool_file="/etc/php/${version}/fpm/pool.d/${pool_name}.conf"
+    local socket="/run/php/php${version}-fpm-${pool_name}.sock"
+
+    local fpm_user fpm_group
+    fpm_user=$(stat -c '%U' "$project_path")
+    fpm_group=$(stat -c '%G' "$project_path")
+
+    if [[ -f "$pool_file" ]]; then
+        echo "PHP-FPM pool already exists: $pool_file"
+        return
+    fi
+
+    echo "Creating PHP-FPM pool: $pool_file"
+    sudo tee "$pool_file" > /dev/null <<EOF
+[${pool_name}]
+user = ${fpm_user}
+group = ${fpm_group}
+listen = ${socket}
+listen.owner = ${FPM_LISTEN_OWNER}
+listen.group = ${FPM_LISTEN_GROUP}
+listen.mode = 0660
+
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+
+php_admin_value[memory_limit] = 512M
+php_admin_value[upload_max_filesize] = 96M
+php_admin_value[post_max_size] = 100M
+EOF
+
+    echo "Reloading php${version}-fpm..."
+    sudo systemctl reload "php${version}-fpm"
+    echo "PHP-FPM pool ready → $socket"
+}
+
+# ---------------------------------------------------------------------------
+# Caddy helpers
+# ---------------------------------------------------------------------------
+
+sanitize_domain() {
+    echo "$1" | tr '.-' '_'
+}
+
+ensure_caddy_conf_d() {
+    sudo mkdir -p "$CADDY_CONF_DIR"
+    if [[ -f "$CADDY_FILE" ]] && ! grep -q "import ${CADDY_CONF_DIR}" "$CADDY_FILE"; then
+        local tmp
+        tmp=$(mktemp)
+        { echo "import ${CADDY_CONF_DIR}/*.caddy"; echo ""; cat "$CADDY_FILE"; } > "$tmp"
+        sudo mv "$tmp" "$CADDY_FILE"
+        sudo chown root:root "$CADDY_FILE"
+        sudo chmod 644 "$CADDY_FILE"
+        echo "Added import directive to $CADDY_FILE"
+    elif [[ ! -f "$CADDY_FILE" ]]; then
+        sudo tee "$CADDY_FILE" > /dev/null <<EOF
+import ${CADDY_CONF_DIR}/*.caddy
+EOF
+    fi
+}
+
+write_caddy_vhost() {
+    local domain="$1"
+    local content="$2"
+    local vhost_file="${CADDY_CONF_DIR}/${domain}.caddy"
+
+    if [[ -f "$vhost_file" ]]; then
+        echo "Caddy vhost already exists: $vhost_file"
+        return
+    fi
+
+    echo "Writing Caddy vhost: $vhost_file"
+    echo "$content" | sudo tee "$vhost_file" > /dev/null
+
+    echo "Reloading Caddy..."
+    sudo systemctl reload caddy
+    echo "Caddy vhost live → https://${domain}"
+}
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+setup_php() {
+    local domain="$1"
+    local project_path="$2"
+
+    if [[ ! -d "$project_path" ]]; then
+        echo "Error: path does not exist: $project_path" >&2
+        exit 1
+    fi
+
+    local version
+    version=$(get_php_version "$project_path")
+
+    if [[ -z "$version" ]]; then
+        echo "Error: could not determine PHP version from $project_path" >&2
+        echo "Create a .php-version file or add a require.php to composer.json" >&2
+        exit 1
+    fi
+
+    echo "PHP version: $version"
+
+    ensure_fpm_running "$version"
+
+    local pool_name
+    pool_name=$(sanitize_domain "$domain")
+    local socket="/run/php/php${version}-fpm-${pool_name}.sock"
+
+    setup_fpm_pool "$version" "$pool_name" "$project_path"
+    ensure_caddy_conf_d
+
+    local vhost_content
+    vhost_content="${domain} {
+    root * ${project_path}
+    php_fastcgi unix/${socket}
+    encode gzip
+    file_server
+}"
+
+    write_caddy_vhost "$domain" "$vhost_content"
+}
+
+setup_static() {
+    local domain="$1"
+    local web_root="$2"
+
+    if [[ ! -d "$web_root" ]]; then
+        echo "Error: path does not exist: $web_root" >&2
+        exit 1
+    fi
+
+    ensure_caddy_conf_d
+
+    local vhost_content
+    vhost_content="${domain} {
+    root * ${web_root}
+    encode gzip
+    try_files {path} /index.html
+    file_server
+}"
+
+    write_caddy_vhost "$domain" "$vhost_content"
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+usage() {
+    echo "Usage: caddy-setup <template> <domain> <path>"
+    echo ""
+    echo "Templates:"
+    echo "  php     PHP project — detects version, sets up PHP-FPM pool and Caddy vhost"
+    echo "  static  Static/SPA project — serves files with HTML5 history fallback"
+    echo ""
+    echo "Examples:"
+    echo "  caddy-setup php    myapp.example.com /home/liam/projects/myapp"
+    echo "  caddy-setup static app.example.com  /home/liam/projects/frontend/dist"
+    exit 1
+}
+
+main() {
+    if [[ $# -ne 3 ]]; then
+        usage
+    fi
+
+    local template="$1"
+    local domain="$2"
+    local project_path="${3%/}"  # strip trailing slash
+
+    case "$template" in
+        php)    setup_php "$domain" "$project_path" ;;
+        static) setup_static "$domain" "$project_path" ;;
+        *)
+            echo "Unknown template: $template" >&2
+            usage
+            ;;
+    esac
+}
+
+main "$@"
