@@ -75,6 +75,11 @@ setup_fpm_pool() {
         return
     fi
 
+    local session_dir="/var/lib/php/sessions/${pool_name}"
+    sudo mkdir -p "$session_dir"
+    sudo chown "${fpm_user}:${fpm_group}" "$session_dir"
+    sudo chmod 700 "$session_dir"
+
     echo "Creating PHP-FPM pool: $pool_file"
     sudo tee "$pool_file" > /dev/null <<EOF
 [${pool_name}]
@@ -94,6 +99,7 @@ pm.max_spare_servers = 3
 php_admin_value[memory_limit] = 512M
 php_admin_value[upload_max_filesize] = 96M
 php_admin_value[post_max_size] = 100M
+php_admin_value[session.save_path] = ${session_dir}
 EOF
 
     echo "Reloading php${version}-fpm..."
