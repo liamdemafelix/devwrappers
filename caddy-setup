@@ -108,6 +108,9 @@ php_admin_value[memory_limit] = 512M
 php_admin_value[upload_max_filesize] = 96M
 php_admin_value[post_max_size] = 100M
 php_admin_value[session.save_path] = ${session_dir}
+
+env[PATH] = ${SCRIPT_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+env[HOME] = ${HOME}
 EOF
 
     echo "Reloading php${version}-fpm..."
