@@ -5,155 +5,31 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 FPM_LISTEN_OWNER="caddy"
 FPM_LISTEN_GROUP="caddy"
 CADDY_CONF_DIR="/etc/caddy/conf.d"
 CADDY_FILE="/etc/caddy/Caddyfile"
 
 # ---------------------------------------------------------------------------
-# OS detection
+# PHP repo helper
 # ---------------------------------------------------------------------------
-
-detect_os() {
-    case "$(uname -s)" in
-        Darwin) echo "macos" ;;
-        Linux)
-            if [[ -f /etc/os-release ]]; then
-                . /etc/os-release
-                case "$ID" in
-                    fedora) echo "fedora" ;;
-                    ubuntu|debian) echo "ubuntu" ;;
-                    *) echo "unknown" ;;
-                esac
-            else
-                echo "unknown"
-            fi
-            ;;
-        *) echo "unknown" ;;
-    esac
-}
-
-DISTRO=$(detect_os)
-
-# ---------------------------------------------------------------------------
-# PHP repo / jq helpers (mirrors php script)
-# ---------------------------------------------------------------------------
-
-ensure_jq() {
-    if ! command -v jq &>/dev/null; then
-        case "$DISTRO" in
-            ubuntu) sudo apt-get install -y jq &>/dev/null ;;
-            fedora) sudo dnf install -y jq &>/dev/null ;;
-        esac
-    fi
-}
 
 ensure_php_repo() {
-    case "$DISTRO" in
-        ubuntu)
-            if ! grep -q "ondrej/php" /etc/apt/sources.list.d/*.list 2>/dev/null; then
-                sudo apt-get install -y software-properties-common &>/dev/null
-                sudo add-apt-repository -y ppa:ondrej/php &>/dev/null
-                sudo apt-get update &>/dev/null
-            fi
-            ;;
-        fedora)
-            if ! ls /etc/yum.repos.d/remi* &>/dev/null; then
-                local fedora_version
-                fedora_version=$(rpm -E %fedora)
-                sudo dnf install -y "https://rpms.remirepo.net/fedora/remi-release-${fedora_version}.rpm" &>/dev/null
-            fi
-            ;;
-    esac
+    if ! grep -q "ondrej/php" /etc/apt/sources.list.d/*.list 2>/dev/null; then
+        sudo apt-get install -y software-properties-common &>/dev/null
+        sudo add-apt-repository -y ppa:ondrej/php &>/dev/null
+        sudo apt-get update &>/dev/null
+    fi
 }
 
 # ---------------------------------------------------------------------------
-# PHP version detection (mirrors php script logic)
+# PHP version detection — delegate to the php wrapper for consistency
 # ---------------------------------------------------------------------------
-
-parse_version_constraint() {
-    local constraint="$1"
-    constraint="${constraint// /}"
-    constraint="${constraint%%,*}"
-    constraint="${constraint%%|*}"
-
-    if [[ "$constraint" =~ ^\^([0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    elif [[ "$constraint" =~ ^\>=([0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    elif [[ "$constraint" =~ ^\>([0-9]+)\.([0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}.$((BASH_REMATCH[2] + 1))"
-    elif [[ "$constraint" =~ ^~([0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    elif [[ "$constraint" =~ ^([0-9]+\.[0-9]+)\.\* ]]; then
-        echo "${BASH_REMATCH[1]}"
-    elif [[ "$constraint" =~ ^([0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    elif [[ "$constraint" =~ ^([0-9]+)$ ]]; then
-        echo "${BASH_REMATCH[1]}.0"
-    fi
-}
-
-read_php_version_file() {
-    local path="$1"
-    if [[ -f "$path/.php-version" ]]; then
-        local version
-        version=$(head -1 "$path/.php-version" | tr -d '[:space:]')
-        if [[ "$version" =~ ^([0-9]+)$ ]]; then
-            echo "${version}.0"
-        elif [[ "$version" =~ ^([0-9]+\.[0-9]+) ]]; then
-            echo "${BASH_REMATCH[1]}"
-        fi
-    fi
-}
-
-read_composer_json() {
-    local path="$1"
-    if [[ -f "$path/composer.json" ]]; then
-        ensure_jq
-        local php_require
-        php_require=$(jq -r '.require.php // empty' "$path/composer.json" 2>/dev/null)
-        if [[ -n "$php_require" ]]; then
-            parse_version_constraint "$php_require"
-        fi
-    fi
-}
-
-get_latest_installed_php() {
-    case "$DISTRO" in
-        ubuntu)
-            local latest=""
-            for php_bin in /usr/bin/php[0-9].[0-9]; do
-                [[ -x "$php_bin" ]] && latest="${php_bin#/usr/bin/php}"
-            done
-            echo "$latest"
-            ;;
-        fedora)
-            local latest=""
-            for php_dir in /opt/remi/php*/root/usr/bin/php; do
-                [[ -x "$php_dir" ]] && latest=$(basename "$(dirname "$(dirname "$(dirname "$(dirname "$php_dir")")")")")
-                latest="${latest#php}"
-                [[ ${#latest} -eq 2 ]] && latest="${latest:0:1}.${latest:1:1}"
-            done
-            echo "$latest"
-            ;;
-    esac
-}
 
 get_php_version() {
     local path="$1"
-    local version
-
-    version=$(read_php_version_file "$path")
-    [[ -n "$version" ]] && echo "$version" && return
-
-    version=$(read_composer_json "$path")
-    [[ -n "$version" ]] && echo "$version" && return
-
-    version=$(get_latest_installed_php)
-    [[ -n "$version" ]] && echo "$version" && return
-
-    echo ""
+    (cd "$path" && "$SCRIPT_DIR/php" -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;' 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
