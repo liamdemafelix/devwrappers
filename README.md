@@ -155,7 +155,16 @@ sudo caddy-setup php myapp.example.com /home/liam/projects/myapp
 
 # Static/SPA (Vue, React, etc.) — serves dist with HTML5 history fallback
 sudo caddy-setup static app.example.com /home/liam/projects/frontend/dist
+
+# Reverse proxy to a running dev server (port, host:port, or full URL)
+sudo caddy-setup proxy api.example.com 3001
 ```
+
+The proxy template:
+- Writes a `reverse_proxy` vhost pointing at a local dev server
+- Accepts a bare port (`3001`), `:port`, `host:port`, or a full `scheme://host:port` upstream — a bare port / `:port` is assumed to be on `localhost`
+- Transparently forwards WebSocket upgrades, so Vite/Nuxt/webpack HMR works through the proxy
+- Terminates HTTPS at Caddy and proxies to the plain-HTTP dev server
 
 The PHP template:
 - Detects the required version from `.php-version` or `composer.json`
